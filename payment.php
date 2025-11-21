@@ -16,15 +16,17 @@ $amount = 49.00;
 // Create Cashfree order
 $cashfreeOrder = createCashfreeOrder($orderId, $amount, $user);
 
-// Save payment record
-try {
-    $stmt = $pdo->prepare("
-        INSERT INTO payments (user_id, order_id, amount, cashfree_order_id) 
-        VALUES (?, ?, ?, ?)
-    ");
-    $stmt->execute([$user['id'], $orderId, $amount, $cashfreeOrder['cf_order_id'] ?? $orderId]);
-} catch (Exception $e) {
-    // Handle error
+// Save payment record only if order creation was successful
+if ($cashfreeOrder && isset($cashfreeOrder['success']) && $cashfreeOrder['success']) {
+    try {
+        $stmt = $pdo->prepare("
+            INSERT INTO payments (user_id, order_id, amount, cashfree_order_id) 
+            VALUES (?, ?, ?, ?)
+        ");
+        $stmt->execute([$user['id'], $orderId, $amount, $cashfreeOrder['cf_order_id'] ?? $orderId]);
+    } catch (Exception $e) {
+        error_log("Payment record insertion error: " . $e->getMessage());
+    }
 }
 ?>
 <!DOCTYPE html>
@@ -222,10 +224,22 @@ try {
 
         async function initiatePayment() {
             try {
-                const paymentSessionId = '<?php echo $cashfreeOrder['payment_session_id'] ?? ''; ?>';
+                // Check if order creation was successful
+                const orderSuccess = <?php echo json_encode(isset($cashfreeOrder, $cashfreeOrder['success']) && $cashfreeOrder['success']); ?>;
+                const errorMessage = <?php echo json_encode(isset($cashfreeOrder['error']) ? $cashfreeOrder['error'] : ''); ?>;
+                
+                if (!orderSuccess) {
+                    const message = errorMessage || 'Payment initialization failed. Please try again.';
+                    alert('Error: ' + message);
+                    console.error('Order creation failed:', errorMessage);
+                    return;
+                }
+
+                const paymentSessionId = '<?php echo isset($cashfreeOrder['payment_session_id']) ? $cashfreeOrder['payment_session_id'] : ''; ?>';
                 
                 if (!paymentSessionId) {
-                    alert('Payment initialization failed. Please try again.');
+                    alert('Error: Payment session ID is missing. Please contact support.');
+                    console.error('Payment session ID is missing from the response');
                     return;
                 }
 
@@ -238,14 +252,15 @@ try {
                 cashfree.checkout(checkoutOptions).then(function(result) {
                     if (result.error) {
                         alert('Payment failed: ' + result.error.message);
+                        console.error('Cashfree checkout error:', result.error);
                     }
                     if (result.redirect) {
                         console.log('Payment will be redirected');
                     }
                 });
             } catch (error) {
-                alert('Payment initialization failed. Please try again.');
-                console.error(error);
+                alert('Payment initialization failed: ' + (error.message || 'Unknown error'));
+                console.error('Payment initialization error:', error);
             }
         }
     </script>
@@ -254,6 +269,25 @@ try {
 
 <?php
 function createCashfreeOrder($orderId, $amount, $user) {
+    // CRITICAL: Validate API credentials before making request
+    if (!defined('CASHFREE_APP_ID') || empty(CASHFREE_APP_ID) || CASHFREE_APP_ID === 'YOUR_CASHFREE_APP_ID') {
+        $error = 'Cashfree App ID is not configured';
+        error_log("Cashfree Error: " . $error);
+        return [
+            'success' => false,
+            'error' => $error
+        ];
+    }
+    
+    if (!defined('CASHFREE_SECRET_KEY') || empty(CASHFREE_SECRET_KEY) || CASHFREE_SECRET_KEY === 'YOUR_CASHFREE_SECRET_KEY') {
+        $error = 'Cashfree Secret Key is not configured';
+        error_log("Cashfree Error: " . $error);
+        return [
+            'success' => false,
+            'error' => $error
+        ];
+    }
+    
     $url = CASHFREE_ENV === 'PROD' 
         ? 'https://api.cashfree.com/pg/orders' 
         : 'https://sandbox.cashfree.com/pg/orders';
@@ -281,20 +315,114 @@ function createCashfreeOrder($orderId, $amount, $user) {
         'x-client-secret: ' . CASHFREE_SECRET_KEY
     ];
     
+    // Initialize cURL
     $ch = curl_init($url);
+    if ($ch === false) {
+        $error = 'Failed to initialize cURL';
+        error_log("Cashfree Error: " . $error);
+        return [
+            'success' => false,
+            'error' => $error
+        ];
+    }
+    
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_POST, true);
     curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($orderData));
     curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
     
+    // Optional: Skip SSL verification for testing (NOT recommended for production)
+    if (defined('CASHFREE_SKIP_SSL_VERIFY') && CASHFREE_SKIP_SSL_VERIFY === true) {
+        if (CASHFREE_ENV === 'PROD') {
+            error_log("CRITICAL WARNING: Attempted to disable SSL verification in PRODUCTION environment! Request blocked.");
+            return [
+                'success' => false,
+                'error' => 'SSL verification cannot be disabled in production environment'
+            ];
+        }
+        error_log("WARNING: SSL verification is disabled for Cashfree API. This should only be used for testing!");
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+    }
+    
+    // Execute request
     $response = curl_exec($ch);
+    
+    // CRITICAL: Check for cURL errors
+    if ($response === false) {
+        $curlError = curl_error($ch);
+        $curlErrno = curl_errno($ch);
+        curl_close($ch);
+        
+        $error = "cURL Error ($curlErrno): $curlError";
+        error_log("Cashfree API Error: " . $error);
+        
+        return [
+            'success' => false,
+            'error' => 'Network error occurred. Please try again later.'
+        ];
+    }
+    
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
     
-    if ($httpCode === 200) {
-        return json_decode($response, true);
+    // Handle empty response
+    if (empty($response)) {
+        error_log("Cashfree API Error: Empty response received (HTTP $httpCode)");
+        return [
+            'success' => false,
+            'error' => 'Empty response from payment gateway'
+        ];
     }
     
-    return null;
+    // Add try-catch for JSON decode to handle invalid JSON
+    try {
+        $decodedResponse = json_decode($response, true);
+        
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            $jsonError = json_last_error_msg();
+            error_log("Cashfree API Error: JSON decode failed - $jsonError. Response: $response");
+            return [
+                'success' => false,
+                'error' => 'Invalid response format from payment gateway'
+            ];
+        }
+    } catch (Exception $e) {
+        error_log("Cashfree API Error: Exception during JSON decode - " . $e->getMessage());
+        return [
+            'success' => false,
+            'error' => 'Failed to parse payment gateway response'
+        ];
+    }
+    
+    // Validate HTTP status code and response structure
+    if ($httpCode === 200) {
+        // CRITICAL: Check if payment_session_id exists in response
+        if (!isset($decodedResponse['payment_session_id']) || empty($decodedResponse['payment_session_id'])) {
+            error_log("Cashfree API Error: payment_session_id missing in response. HTTP $httpCode. Response: " . json_encode($decodedResponse));
+            return [
+                'success' => false,
+                'error' => 'Payment session ID not received from gateway'
+            ];
+        }
+        
+        // Success - return structured response
+        $responseData = $decodedResponse;
+        $responseData['success'] = true; // Explicitly set success flag
+        return $responseData;
+    } else {
+        // API returned error
+        $errorMessage = isset($decodedResponse['message']) ? $decodedResponse['message'] : 'Unknown error';
+        $errorType = isset($decodedResponse['type']) ? $decodedResponse['type'] : 'API_ERROR';
+        
+        error_log("Cashfree API Error: HTTP $httpCode - Type: $errorType, Message: $errorMessage. Full response: " . json_encode($decodedResponse));
+        
+        return [
+            'success' => false,
+            'error' => $errorMessage,
+            'error_type' => $errorType,
+            'http_code' => $httpCode
+        ];
+    }
 }
 ?>
