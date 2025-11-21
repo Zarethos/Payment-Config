@@ -225,7 +225,7 @@ if ($cashfreeOrder && isset($cashfreeOrder['success']) && $cashfreeOrder['succes
         async function initiatePayment() {
             try {
                 // Check if order creation was successful
-                const orderSuccess = <?php echo json_encode(isset($cashfreeOrder['success']) && $cashfreeOrder['success']); ?>;
+                const orderSuccess = <?php echo json_encode(isset($cashfreeOrder, $cashfreeOrder['success']) && $cashfreeOrder['success']); ?>;
                 const errorMessage = <?php echo json_encode(isset($cashfreeOrder['error']) ? $cashfreeOrder['error'] : ''); ?>;
                 
                 if (!orderSuccess) {
@@ -407,10 +407,9 @@ function createCashfreeOrder($orderId, $amount, $user) {
         }
         
         // Success - return structured response
-        return array_merge(
-            ['success' => true],
-            $decodedResponse
-        );
+        $responseData = $decodedResponse;
+        $responseData['success'] = true; // Explicitly set success flag
+        return $responseData;
     } else {
         // API returned error
         $errorMessage = isset($decodedResponse['message']) ? $decodedResponse['message'] : 'Unknown error';
