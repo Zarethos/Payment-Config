@@ -225,8 +225,8 @@ if ($cashfreeOrder && isset($cashfreeOrder['success']) && $cashfreeOrder['succes
         async function initiatePayment() {
             try {
                 // Check if order creation was successful
-                const orderSuccess = <?php echo isset($cashfreeOrder['success']) ? ($cashfreeOrder['success'] ? 'true' : 'false') : 'false'; ?>;
-                const errorMessage = '<?php echo isset($cashfreeOrder['error']) ? addslashes($cashfreeOrder['error']) : ''; ?>';
+                const orderSuccess = <?php echo json_encode(isset($cashfreeOrder['success']) && $cashfreeOrder['success']); ?>;
+                const errorMessage = <?php echo json_encode(isset($cashfreeOrder['error']) ? $cashfreeOrder['error'] : ''); ?>;
                 
                 if (!orderSuccess) {
                     const message = errorMessage || 'Payment initialization failed. Please try again.';
@@ -333,6 +333,13 @@ function createCashfreeOrder($orderId, $amount, $user) {
     
     // Optional: Skip SSL verification for testing (NOT recommended for production)
     if (defined('CASHFREE_SKIP_SSL_VERIFY') && CASHFREE_SKIP_SSL_VERIFY === true) {
+        if (CASHFREE_ENV === 'PROD') {
+            error_log("CRITICAL WARNING: Attempted to disable SSL verification in PRODUCTION environment! Request blocked.");
+            return [
+                'success' => false,
+                'error' => 'SSL verification cannot be disabled in production environment'
+            ];
+        }
         error_log("WARNING: SSL verification is disabled for Cashfree API. This should only be used for testing!");
         curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
         curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
